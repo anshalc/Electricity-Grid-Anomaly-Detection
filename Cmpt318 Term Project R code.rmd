@@ -1,0 +1,1052 @@
+---
+title: "Term Project"
+author: 
+  - Sahaj Karan (301386551)
+  - Anshal Chopra (301384760)
+  - Arshnoor Singh (301401444)
+  - Sakshi Singh (301386720)
+date: "`r Sys.Date()`"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, error = TRUE, cache = TRUE)
+```
+
+
+```{r}
+# Load the required libraries
+library(readr)
+library(dplyr)
+library(lubridate)
+library(zoo)
+library(xts)
+library(ggplot2)
+library(reshape2)
+library(depmixS4)
+library(MASS)
+```
+
+## Importing the Dataset
+
+```{r}
+# Read the dataset
+# The data is delimited by ";"
+power_consumption <- read_delim("household_power_consumption.txt", delim = ";", show_col_types = FALSE)
+```
+
+```{r}
+# Combine Date and Time into a single DateTime column
+# This will help in time series analysis
+power_consumption$DateTime <- paste(power_consumption$Date, power_consumption$Time)
+```
+
+```{r}
+# Convert DateTime to POSIXct
+# POSIXct format is more suitable for handling date-times in R
+power_consumption$DateTime <- as.POSIXct(power_consumption$DateTime, format = "%d/%m/%Y %H:%M:%S")
+```
+
+```{r}
+# Remove rows with NA DateTime
+# This ensures that we don't have missing values in our DateTime column
+power_consumption <- power_consumption[!is.na(power_consumption$DateTime),]
+```
+
+```{r}
+# Move DateTime to the first column
+# This makes it easier to see the DateTime associated with each row
+DateTime <- power_consumption$DateTime
+power_consumption <- subset(power_consumption, select = -c(Date, Time, DateTime))
+power_consumption <- cbind(DateTime, power_consumption)
+```
+
+```{r}
+# Convert all columns (except DateTime) to double
+# This ensures that the data is in a suitable format for mathematical operations
+power_consumption[-1] <- lapply(power_consumption[-1], as.double)
+```
+
+```{r}
+# Display the last few rows of the data
+# This helps to verify that the transformations have been applied correctly
+tail(power_consumption)
+```
+
+------------------------------------------------------------------------------------------------------------------------------------
+
+## Splitting the Data into Train and Test Subsets
+```{r}
+# Get the minimum date in the data
+min_date <- min(power_consumption$DateTime)
+```
+
+```{r}
+# Add 3 years to the minimum date to define the end of the training period
+end_date <- min_date %m+% years(3)
+```
+
+```{r}
+# Extract the year from the minimum date
+start_year <- year(min_date)
+```
+
+```{r}
+# Extract the year from the end date
+end_year <- year(end_date)
+```
+
+```{r}
+# Filter rows where the year of DateTime is between start_year and end_year
+# This will be our training data
+power_consumption_train_data <- as.data.frame(power_consumption %>%
+  filter(year(DateTime) >= start_year & year(DateTime) <= end_year))
+```
+
+```{r}
+# Filter rows where the year of DateTime is greater than end_year
+# This will be our testing data
+power_consumption_test_data <- as.data.frame(power_consumption %>%
+  filter(year(DateTime) > end_year))
+```
+
+------------------------------------------------------------------------------------------------------------------------------------
+
+## Exploratory Data Analysis and Feature Scaling
+```{r}
+# Display summary statistics for the training dataset
+print("Summary Statistics for Training Data:")
+summary(power_consumption_train_data)
+```
+
+```{r}
+# Calculate the correlation matrix excluding NA values
+correlation_matrix <- cor(power_consumption_train_data[2:8], use = "pairwise.complete.obs")
+
+# Melt the correlation matrix
+melted_correlation_matrix <- reshape2::melt(correlation_matrix)
+
+# Create a ggplot correlation matrix
+ggplot2::ggplot(data = melted_correlation_matrix, aes(x=Var1, y=Var2, fill=value)) + 
+  geom_tile() +
+  scale_fill_gradient2(low = "blue", high = "red", mid = "white", 
+                       midpoint = 0, limit = c(-1,1), space = "Lab", 
+                       name="Pearson\nCorrelation") +
+  theme_minimal() + 
+  theme(axis.text.x = element_text(angle = 45, vjust = 1, 
+                                   size = 12, hjust = 1),
+        axis.text.y = element_text(size = 12)) +
+  coord_fixed()
+
+```
+
+```{r}
+# Convert the dataframes to multivariate time series objects
+power_consumption_train_interpolated <- xts(power_consumption_train_data,
+                            order.by = power_consumption_train_data$DateTime)
+power_consumption_test_interpolated <- xts(power_consumption_test_data,
+                            order.by = power_consumption_test_data$DateTime)
+```
+
+```{r}
+# Remove DateTime from the datasets
+power_consumption_train_interpolated <- subset(power_consumption_train_interpolated, select = -c(DateTime))
+power_consumption_test_interpolated <- subset(power_consumption_test_interpolated, select = -c(DateTime))
+```
+
+```{r}
+# Interpolate the datasets to fill missing values
+power_consumption_train_interpolated <- na.approx(power_consumption_train_interpolated)
+power_consumption_test_interpolated <- na.approx(power_consumption_test_interpolated, rule = 2)
+```
+
+```{r}
+# Display the first few rows of the interpolated training data
+print("Rows of Interpolated Training Data:")
+head(power_consumption_train_interpolated)
+```
+
+```{r}
+# Convert the zoo objects back to dataframes
+power_consumption_train_interpolated <- data.frame(DateTime = index(power_consumption_train_interpolated), as.data.frame(power_consumption_train_interpolated))
+rownames(power_consumption_train_interpolated) <- NULL
+power_consumption_test_interpolated <- data.frame(DateTime = index(power_consumption_test_interpolated), as.data.frame(power_consumption_test_interpolated))
+rownames(power_consumption_test_interpolated) <- NULL
+```
+
+```{r}
+# Check if there are any missing values in the interpolated training data
+print("Number of Missing Values in Interpolated Training Data:")
+sum(is.na(power_consumption_train_interpolated))
+```
+
+```{r}
+# Convert all the character variables to double
+power_consumption_train_interpolated[-1] <- lapply(power_consumption_train_interpolated[-1], as.double)
+power_consumption_test_interpolated[-1] <- lapply(power_consumption_test_interpolated[-1], as.double)
+```
+
+```{r}
+# Display summary statistics for the interpolated training data
+print("Summary Statistics for Interpolated Training Data:")
+summary(power_consumption_train_interpolated)
+```
+
+```{r}
+# Select only numeric variables from the dataset
+numeric_vars <- power_consumption_train_interpolated[, sapply(power_consumption_train_interpolated, is.numeric)]
+```
+
+```{r}
+# Create boxplots for all numeric variables
+bp <- boxplot(numeric_vars, main = "Boxplot of Numeric Variables", names = NULL, axes = FALSE)
+axis(2)
+# Add labels for variable names onto the boxplot
+text(x = 1:length(names(numeric_vars)), y = par("usr")[3] - 0.3, 
+     labels = names(numeric_vars), srt = 45, adj = 1, xpd = TRUE, cex = 0.8)
+```
+```{r}
+# Set the seed for reproducibility
+set.seed(123)
+
+# Determine the size of the sample
+sample_size <- 10000  # Adjust this value as needed
+
+# Take a random sample of the data
+sample_data <- power_consumption_train_interpolated[sample(nrow(power_consumption_train_interpolated), sample_size), ]
+
+# Now you can create your scatterplot matrix with the sampled data
+
+# Select the columns for the scatterplot matrix
+data <- sample_data[2:8]
+
+# Create a custom panel function for the diagonal
+panel.hist <- function(x, ...)
+{
+  usr <- par("usr"); on.exit(par(usr))
+  par(usr = c(usr[1:2], 0, 1.5) )
+  h <- hist(x, plot = FALSE)
+  breaks <- h$breaks; nB <- length(breaks)
+  y <- h$counts; y <- y/max(y)
+  rect(breaks[-nB], 0, breaks[-nB + 1], y, col = "cyan", ...)
+}
+
+# Create the scatterplot matrix
+pairs(data, diag.panel = panel.hist)
+```
+
+```{r}
+power_consumption_train_data_1 <- na.omit(power_consumption_train_data)
+# Set the seed for reproducibility
+set.seed(123)
+
+# Determine the size of the sample
+sample_size <- 10000  # Adjust this value as needed
+
+# Take a random sample of the data
+sample_data <- power_consumption_train_data_1[sample(nrow(power_consumption_train_data_1), sample_size), ]
+
+# Now you can create your scatterplot matrix with the sampled data
+
+# Select the columns for the scatterplot matrix
+data <- sample_data[6:8]
+
+# Create a custom panel function for the diagonal
+panel.hist <- function(x, ...)
+{
+  usr <- par("usr"); on.exit(par(usr))
+  par(usr = c(usr[1:2], 0, 1.5) )
+  h <- hist(x, plot = FALSE)
+  breaks <- h$breaks; nB <- length(breaks)
+  y <- h$counts; y <- y/max(y)
+  rect(breaks[-nB], 0, breaks[-nB + 1], y, col = "cyan", ...)
+}
+
+# Create the scatterplot matrix
+pairs(data, diag.panel = panel.hist)
+```
+```{r}
+# Create data frames of the counts for each Sub_metering variable
+counts_df1 <- as.data.frame(table(power_consumption_train_data$Sub_metering_1, exclude = NULL))
+names(counts_df1) <- c("Value", "Count_1")
+
+counts_df2 <- as.data.frame(table(power_consumption_train_data$Sub_metering_2, exclude = NULL))
+names(counts_df2) <- c("Value", "Count_2")
+
+counts_df3 <- as.data.frame(table(power_consumption_train_data$Sub_metering_3, exclude = NULL))
+names(counts_df3) <- c("Value", "Count_3")
+
+# Combine the data frames
+combined_counts_df <- merge(counts_df1, counts_df2, by = "Value", all = TRUE)
+combined_counts_df <- merge(combined_counts_df, counts_df3, by = "Value", all = TRUE)
+
+# Replace NA values with 0
+combined_counts_df[is.na(combined_counts_df)] <- 0
+
+head(combined_counts_df)
+```
+
+```{r}
+#Converting the Sub_metering columns into 1 column to get the over watt/hour usage
+power_consumption_train_interpolated$Sub_metering_grouped <- power_consumption_train_interpolated$Sub_metering_1 + power_consumption_train_interpolated$Sub_metering_2 + power_consumption_train_interpolated$Sub_metering_3
+
+power_consumption_test_interpolated$Sub_metering_grouped <- power_consumption_test_interpolated$Sub_metering_1 + power_consumption_test_interpolated$Sub_metering_2 + power_consumption_test_interpolated$Sub_metering_3
+
+# Drop the specified columns from the training dataframe
+power_consumption_train_interpolated <- power_consumption_train_interpolated[ , !(names(power_consumption_train_interpolated) %in% c("Sub_metering_1", "Sub_metering_2", "Sub_metering_3"))]
+
+# Drop the specified columns from the test dataframe
+power_consumption_test_interpolated <- power_consumption_test_interpolated[ , !(names(power_consumption_test_interpolated) %in% c("Sub_metering_1", "Sub_metering_2", "Sub_metering_3"))]
+```
+
+```{r}
+# Load the necessary libraries
+library(bestNormalize)
+library(parallel)
+
+# Assuming df_train is your training dataframe and df_test is your test dataframe
+df_train <- power_consumption_train_interpolated  # replace this with your actual training dataframe
+df_test <- power_consumption_test_interpolated  # replace this with your actual test dataframe
+
+# Calculate the transformation parameters using the training set
+transformations <- mclapply(df_train[-1], bestNormalize, mc.cores = detectCores())
+```
+
+```{r}
+# Apply the transformations to the training set and test set
+df_train[-1] <- mapply(function(x, trans) predict(trans, newdata = x), df_train[-1], transformations)
+df_test[-1] <- mapply(function(x, trans) predict(trans, newdata = x), df_test[-1], transformations)
+
+```
+
+```{r}
+power_consumption_train_interpolated[-1] <- df_train[-1]
+power_consumption_test_interpolated[-1] <- df_test[-1]
+```
+
+
+```{r}
+# Set the seed for reproducibility
+set.seed(123)
+
+# Determine the size of the sample
+sample_size <- 10000  # Adjust this value as needed
+
+# Take a random sample of the data
+sample_data <- power_consumption_train_interpolated[sample(nrow(power_consumption_train_interpolated), sample_size), ]
+
+# Now you can create your scatterplot matrix with the sampled data
+
+# Select the columns for the scatterplot matrix
+data <- sample_data[2:6]
+
+# Create a custom panel function for the diagonal
+panel.hist <- function(x, ...)
+{
+  usr <- par("usr"); on.exit(par(usr))
+  par(usr = c(usr[1:2], 0, 1.5) )
+  h <- hist(x, plot = FALSE)
+  breaks <- h$breaks; nB <- length(breaks)
+  y <- h$counts; y <- y/max(y)
+  rect(breaks[-nB], 0, breaks[-nB + 1], y, col = "cyan", ...)
+}
+
+# Create the scatterplot matrix
+pairs(data, diag.panel = panel.hist)
+```
+
+
+```{r}
+# Calculate the min and max of the training dataset
+train_mean <- apply(power_consumption_train_interpolated[-1], 2, mean)
+train_sd <- apply(power_consumption_train_interpolated[-1], 2, sd)
+```
+
+```{r}
+# Scale the training dataset using the calculated mean and standard deviation
+# Add the DateTime column back to the scaled training dataset
+power_consumption_train_scaled <- cbind(power_consumption_train_interpolated$DateTime, as.data.frame(scale(power_consumption_train_interpolated[-1], center = train_mean, scale = train_sd)))
+names(power_consumption_train_scaled)[1] <- "DateTime"
+```
+
+```{r}
+# Scale the testing dataset using the mean and standard deviation from the training dataset
+# Add the DateTime column back to the scaled testing dataset
+power_consumption_test_scaled <- as.data.frame(scale(power_consumption_test_interpolated[-1], center = train_mean, scale = train_sd))
+power_consumption_test_scaled <- cbind(power_consumption_test_interpolated$DateTime, power_consumption_test_scaled)
+names(power_consumption_test_scaled)[1] <- "DateTime"
+```
+
+```{r}
+summary(power_consumption_train_scaled)
+```
+
+```{r}
+# Select only numeric variables from the dataset
+numeric_vars <- power_consumption_train_scaled[, sapply(power_consumption_train_scaled, is.numeric)]
+```
+
+```{r}
+# Create boxplots for all numeric variables with rotated x-axis labels
+bp <- boxplot(numeric_vars, main = "Boxplot of Numeric Variables", names = NULL, axes = FALSE)
+axis(2)
+# Add labels for variable names onto the boxplot
+text(x = 1:length(names(numeric_vars)), y = par("usr")[3] - 0.3, 
+     labels = names(numeric_vars), srt = 45, adj = 1, xpd = TRUE, cex = 0.8)
+```
+
+```{r}
+# Set the seed for reproducibility
+set.seed(123)
+
+# Determine the size of the sample
+sample_size <- 10000  # Adjust this value as needed
+
+# Take a random sample of the data
+sample_data <- power_consumption_train_scaled[sample(nrow(power_consumption_train_scaled), sample_size), ]
+
+# Now you can create your scatterplot matrix with the sampled data
+
+# Select the columns for the scatterplot matrix
+data <- sample_data[2:6]
+
+# Create a custom panel function for the diagonal
+panel.hist <- function(x, ...)
+{
+  usr <- par("usr"); on.exit(par(usr))
+  par(usr = c(usr[1:2], 0, 1.5) )
+  h <- hist(x, plot = FALSE)
+  breaks <- h$breaks; nB <- length(breaks)
+  y <- h$counts; y <- y/max(y)
+  rect(breaks[-nB], 0, breaks[-nB + 1], y, col = "cyan", ...)
+}
+
+# Create the scatterplot matrix
+pairs(data, diag.panel = panel.hist)
+```
+
+```{r}
+# Store the scaled training dataset to z_scores_train variable
+z_scores_train <- power_consumption_train_scaled
+print("Z-Scores for Training Data:")
+head(z_scores_train)
+```
+
+```{r}
+# Define a function to detect anomalies across the data
+anomally_across_data <- function(x) {
+  any(x>3)
+}
+```
+
+```{r}
+# Count the number of data points with Z-score greater than 3 for the entire dataset
+result1 <- sum(as.numeric(apply(z_scores_train[-1], 1, anomally_across_data)))
+print(paste("Number of data points with Z-score > 3 for the entire dataset: ", result1))
+```
+
+```{r}
+# Calculate the percentage of anomalies in the entire dataset
+anomaly_across_data_pct <- result1*100/nrow(z_scores_train)
+print(paste("Percentage of anomalies in the entire dataset is: ", anomaly_across_data_pct))
+```
+
+```{r}
+# Define a function to count the number of anomalies for each feature
+sum_anomalies <- function(x) {
+  length(x[x>3])
+}
+```
+
+```{r}
+# Count the number of data points with Z-score greater than 3 for each feature
+result2 <- apply(z_scores_train[-1], 2, sum_anomalies)
+print("Number of data points with Z-score > 3 for each feature:")
+print(result2)
+```
+
+------------------------------------------------------------------------------------------------------------------------------------
+
+## Removing/Reducing Outliers
+```{r}
+# standard deviation of the scaled training data (i.e. 1)
+scaled_train_sd <- apply(power_consumption_train_scaled[-1], 2, sd)
+```
+
+```{r}
+# Define the lower and upper bounds for each column
+lower_bound <-  -1*(3 * scaled_train_sd)
+upper_bound <-   3 * scaled_train_sd
+```
+
+```{r}
+# Function to remove outliers for each row based on the calculated bounds
+remove_outliers <- function(row) {
+  all(row >= lower_bound & row <= upper_bound)
+}
+```
+
+```{r}
+# Remove outliers in the train dataset
+preprocessed_train_data <- power_consumption_train_scaled[
+  apply(power_consumption_train_scaled[, -1], 1, remove_outliers), ]
+```
+
+```{r}
+# Remove outliers in the test dataset
+preprocessed_test_data <- power_consumption_test_scaled[
+  apply(power_consumption_test_scaled[, -1], 1, remove_outliers), ]
+```
+
+```{r}
+summary(preprocessed_train_data)
+```
+
+```{r}
+# Select only numeric variables from the dataset
+numeric_vars <- preprocessed_train_data[, sapply(preprocessed_train_data, is.numeric)]
+```
+
+```{r}
+# Create boxplots for all numeric variables with rotated x-axis labels
+bp <- boxplot(numeric_vars, main = "Boxplot of Numeric Variables", names = NULL, axes = FALSE)
+axis(2)
+
+# Add labels for variable names onto the boxplot
+text(x = 1:length(names(numeric_vars)), y = par("usr")[3] - 0.3, 
+     labels = names(numeric_vars), srt = 45, adj = 1, xpd = TRUE, cex = 0.8)
+```
+
+```{r}
+# Create a new column for the week number
+preprocessed_train_data$Week <- as.numeric(format(preprocessed_train_data$DateTime, "%W")) + 
+                                 52 * (year(preprocessed_train_data$DateTime) - min(year(preprocessed_train_data$DateTime)))
+preprocessed_train_data$Week <- preprocessed_train_data$Week - preprocessed_train_data$Week[1] + 1
+
+preprocessed_test_data$Week <- as.numeric(format(preprocessed_test_data$DateTime, "%W")) + 
+                                 52 * (year(preprocessed_test_data$DateTime) - min(year(preprocessed_test_data$DateTime)))
+preprocessed_test_data$Week <- preprocessed_test_data$Week - preprocessed_test_data$Week[1] + 1
+```
+
+```{r}
+# Calculate moving average for each given week for the train dataset
+preprocessed_data_train_ma <- preprocessed_train_data %>%
+  arrange(Week, DateTime) %>%
+  group_by(Week) %>%
+  mutate(
+    across(
+      c(Global_intensity, Global_active_power, Global_reactive_power, Voltage),
+      ~ rollapply(., width = 7, FUN = mean, align = "right", partial = TRUE),
+      .names = "{.col}"
+    )
+  )
+```
+
+```{r}
+# Calculate moving average for each given week for the test dataset
+preprocessed_data_test_ma <- preprocessed_test_data %>%
+  arrange(Week, DateTime) %>%
+  group_by(Week) %>%
+  mutate(
+    across(
+      c(Global_intensity, Global_active_power, Global_reactive_power, Voltage),
+      ~ rollapply(., width = 7, FUN = mean, align = "right", partial = TRUE),
+      .names = "{.col}"
+    )
+  )
+```
+
+```{r}
+# Convert the grouped data frames back to regular data frames
+preprocessed_data_train_ma <- as.data.frame(preprocessed_data_train_ma %>% ungroup())
+preprocessed_data_test_ma <- as.data.frame(preprocessed_data_test_ma %>% ungroup())
+
+# Print the preprocessed training data
+head(preprocessed_data_train_ma)
+```
+
+```{r}
+# Set the seed for reproducibility
+set.seed(123)
+
+# Determine the size of the sample
+sample_size <- 10000  # Adjust this value as needed
+
+# Take a random sample of the data
+sample_data <- preprocessed_data_train_ma[sample(nrow(preprocessed_data_train_ma), sample_size), ]
+
+# Now you can create your scatterplot matrix with the sampled data
+
+# Select the columns for the scatterplot matrix
+data <- sample_data[2:6]
+
+# Create a custom panel function for the diagonal
+panel.hist <- function(x, ...)
+{
+  usr <- par("usr"); on.exit(par(usr))
+  par(usr = c(usr[1:2], 0, 1.5) )
+  h <- hist(x, plot = FALSE)
+  breaks <- h$breaks; nB <- length(breaks)
+  y <- h$counts; y <- y/max(y)
+  rect(breaks[-nB], 0, breaks[-nB + 1], y, col = "cyan", ...)
+}
+
+# Create the scatterplot matrix
+pairs(data, diag.panel = panel.hist)
+```
+
+------------------------------------------------------------------------------------------------------------------------------------
+
+## Feature Engineering Using PCA
+```{r}
+# Calculate the correlation matrix excluding NA values
+correlation_matrix <- cor(preprocessed_data_train_ma[2:6], use = "pairwise.complete.obs")
+
+# Melt the correlation matrix
+melted_correlation_matrix <- reshape2::melt(correlation_matrix)
+
+# Create a ggplot correlation matrix
+ggplot2::ggplot(data = melted_correlation_matrix, aes(x=Var1, y=Var2, fill=value)) + 
+  geom_tile() +
+  scale_fill_gradient2(low = "blue", high = "red", mid = "white", 
+                       midpoint = 0, limit = c(-1,1), space = "Lab", 
+                       name="Pearson\nCorrelation") +
+  theme_minimal() + 
+  theme(axis.text.x = element_text(angle = 45, vjust = 1, 
+                                   size = 12, hjust = 1),
+        axis.text.y = element_text(size = 12)) +
+  coord_fixed()
+
+```
+
+```{r}
+print(correlation_matrix)
+```
+
+```{r}
+# Remove "Global_intensity" column from preprocessed_data_train_ma due to high correlation with Global_active_power
+
+preprocessed_data_train_ma <- preprocessed_data_train_ma[, !colnames(preprocessed_data_train_ma) %in% "Global_intensity"]
+
+# Remove "Global_intensity" column from preprocessed_data_test_ma
+preprocessed_data_test_ma <- preprocessed_data_test_ma[, !colnames(preprocessed_data_test_ma) %in% "Global_intensity"]
+
+```
+
+```{r}
+# Apply PCA to the training data
+pca_result <- prcomp(preprocessed_data_train_ma[2:5], scale. = FALSE)
+```
+
+```{r}
+# Print summary of the PCA result
+print("Summary of PCA Result:")
+summary(pca_result)
+```
+```{r}
+# Extract the principal components
+principal_components <- pca_result$x
+
+# Extract the eigenvalues
+eigenvalues <- pca_result$sdev^2
+
+# Calculate the proportion of variance explained
+variance_explained <- eigenvalues / sum(eigenvalues)
+
+# Calculate the cumulative variance explained
+cumulative_variance <- cumsum(variance_explained)
+
+# Create a column for the principal component names
+pc_names <- paste0("PC", 1:length(eigenvalues))
+
+# Combine everything into a data frame for PCA summary
+pca_summary <- data.frame(PC = pc_names,
+                          Eigenvalues = eigenvalues,
+                          VarianceExplained = variance_explained,
+                          CumulativeVariance = cumulative_variance)
+```
+
+```{r}
+# Print the PCA summary
+print(pca_summary)
+```
+
+```{r}
+# Create a scree plot using the eigenvalues
+df <- data.frame(Eigenvalue = eigenvalues)
+ggplot(df, aes(x = 1:nrow(df), y = Eigenvalue)) +
+  geom_line() +
+  geom_point() +
+  scale_x_continuous(breaks = 1:nrow(df)) +
+  labs(x = "Principal Component",
+       y = "Eigenvalue",
+       title = "Scree Plot")
+```
+
+```{r}
+# The rotation matrix contains the eigenvectors
+rotation_matrix <- pca_result$rotation
+
+# Get the eigenvectors of the first three principal components
+eigenvectors <- rotation_matrix[, 1:3]
+
+# Print the eigenvectors
+print("Eigenvectors of the First Three Principal Components:")
+print(eigenvectors)
+```
+
+------------------------------------------------------------------------------------------------------------------------------------
+
+## Filtering a Time Window
+```{r}
+# Extract weekday from DateTime
+preprocessed_data_train_ma$Weekday <- weekdays(preprocessed_data_train_ma$DateTime)
+
+# Extract hour from DateTime
+preprocessed_data_train_ma$Hour <- hour(preprocessed_data_train_ma$DateTime)
+```
+
+```{r}
+# Calculate overall hourly average for each variable grouoed by weekday
+hourly_average_weekday <- preprocessed_data_train_ma %>%
+  group_by(Weekday, Hour) %>%
+  summarize_at(vars(2:5), mean, na.rm = TRUE, .groups = "drop")
+
+```
+
+```{r}
+# Calculate overall hourly average for each variable across all days
+hourly_average_overall <- preprocessed_data_train_ma %>%
+  group_by(Hour) %>%
+  summarize_at(vars(2:5), mean, na.rm = TRUE)
+
+```
+
+
+```{r}
+# Function to generate plot for each variable
+plot_variable <- function(data_weekday, data_overall, variable) {
+  # Create a new plot for each variable
+  p <- ggplot() +
+    geom_line(data = data_weekday, aes(x = Hour, y = !!sym(variable), color = Weekday), alpha = 0.7) +
+    geom_line(data = data_overall, aes(x = Hour, y = !!sym(variable), color = "Overall"), linetype = "dashed") +
+    labs(x = "Hour", y = variable, title = paste("Hourly Average Comparison:", variable)) +
+    scale_color_manual(values = c(rainbow(7), "black"), labels = c(unique(data_weekday$Weekday), "Overall")) +
+    theme_minimal()
+  return(p)
+}
+```
+
+```{r}
+# Loop through each variable and create a plot
+plots <- lapply(colnames(preprocessed_data_train_ma)[2:5], function(variable) {
+  plot_variable(hourly_average_weekday, hourly_average_overall, variable)
+})
+# Print the plots
+print("Hourly Average Comparison Plots:")
+print(plots)
+```
+```{r}
+# Select the specified columns
+final_preprocessed_data_train <- dplyr::select(preprocessed_data_train_ma, c("DateTime", "Global_active_power", "Voltage"))
+final_preprocessed_data_test <- dplyr::select(preprocessed_data_test_ma, c("DateTime", "Global_active_power", "Voltage"))
+```
+
+```{r}
+# Filter the data where time is between 12:00 - 16:00 and the day of the week is Saturday
+final_preprocessed_data_train <- final_preprocessed_data_train[
+  hour(final_preprocessed_data_train$DateTime) >= 12 & 
+  hour(final_preprocessed_data_train$DateTime) < 16 & 
+  wday(final_preprocessed_data_train$DateTime, label = TRUE) == 'Sat', ]
+
+# Filter the data where time is between 18:00 - 22:00 and the day of the week is Saturday
+final_preprocessed_data_test <- final_preprocessed_data_test[
+  hour(final_preprocessed_data_test$DateTime) >= 12 & 
+  hour(final_preprocessed_data_test$DateTime) < 16 & 
+  wday(final_preprocessed_data_test$DateTime, label = TRUE) == 'Sat', ]
+```
+
+```{r}
+# Order the dataset by DateTime
+final_preprocessed_data_train <- as.data.frame(final_preprocessed_data_train[order(final_preprocessed_data_train$DateTime), ])
+
+final_preprocessed_data_test <- as.data.frame(final_preprocessed_data_test[order(final_preprocessed_data_test$DateTime), ])
+```
+
+
+------------------------------------------------------------------------------------------------------------------------------------
+
+## Fitting the Model
+
+
+```{r}
+# Splitting the first three years of train data into train and test for validation purposes
+
+# Convert your date column to Date format if it's not already
+final_preprocessed_data_train$Date <- as.Date(final_preprocessed_data_train$DateTime)
+
+# Find the date that is 124 weeks from the minimum date
+split_date <- min(final_preprocessed_data_train$Date) + weeks(124)
+
+# Split the data into two parts
+train_data <- final_preprocessed_data_train[final_preprocessed_data_train$Date <= split_date, ]
+test_data <- final_preprocessed_data_train[final_preprocessed_data_train$Date > split_date, ]
+
+```
+
+```{r}
+# Assume 'final_preprocessed_data_test_subset' is your data and 'datetime' is your datetime column
+library(dplyr)
+library(lubridate)
+
+# Group by week and count the number of records in each group
+weekly_counts <- train_data %>%
+  mutate(week = week(Date)) %>%
+  group_by(week) %>%
+  summarise(ntimes = n())
+
+# Extract the 'ntimes' column as a vector
+ntimes <- weekly_counts$ntimes
+```
+
+```{r}
+
+# Initialize an empty list to store the results
+# Set a seed for reproducibility
+set.seed(123)
+
+# Initialize an empty list to store the fitted models
+fitted_models_list <- list()
+results_list <- list()
+
+# Loop over each state with an increment of 3
+for (n_states in seq(4, 16, by=2)) {
+  # Fit the HMM model using the depmix function
+  hmm_model <- depmix(list(Global_active_power ~1,  Voltage~1), 
+                      data = train_data, 
+                      nstates = n_states, 
+                      ntimes = ntimes, 
+                      family = list(gaussian(), gaussian()))
+
+  # Fit the model
+  hmm_model_fit <- fit(hmm_model)
+  
+  # Store the entire fitted model in the list
+  fitted_models_list[[paste("State", n_states)]] <- hmm_model_fit
+  results_list[[paste("State", n_states)]] <- c(BIC = BIC(hmm_model_fit), LogLikelihood = logLik(hmm_model_fit))
+}
+
+# Now, fitted_models_list contains all your fitted models
+
+
+# Bind the results into a single data frame
+results_df <- do.call(rbind, results_list)
+
+
+```
+
+```{r}
+results_df <- as.data.frame(results_df)
+print(results_df)
+```
+
+
+
+```{r}
+# Convert the row names to numeric values for plotting
+states <- as.numeric(gsub("State", "", rownames(results_df)))
+
+# Set the y-axis limits
+ylim <- range(c(results_df$BIC, results_df$LogLikelihood))
+
+# Create a plot for BIC
+plot(states, results_df$BIC, type = "b", col = "blue", xlab = "Number of States", ylab = "", main = "BIC and Log Likelihood for Different Number of States", ylim = ylim)
+# Add Log Likelihood to the plot
+lines(states, results_df$LogLikelihood, type = "b", col = "red")
+
+# Add a legend
+legend("topright", legend = c("BIC", "Log Likelihood"), fill = c("blue", "red"))
+
+
+```
+
+```{r}
+print("The normalized log likelihood value for train data is:")
+LogLikelihood <- logLik(fitted_models_list$`State 10`)/nrow(final_preprocessed_data_train)
+print(LogLikelihood)
+```
+
+```{r}
+new <- fit(fitted_models_list$`State 10`, data = test_data)
+print("The normalized log likelihood value for test data is:")
+LogLikelihood_test <- logLik(new)/nrow(test_data)
+print(LogLikelihood_test)
+```
+
+```{r}
+# Load the dplyr package
+library(dplyr)
+
+# Select only the Global_active_power and Voltage columns
+test_data <- dplyr::select(test_data, Global_active_power, Voltage)
+
+fitted_model <- depmix(list(Global_active_power ~ 1, Voltage ~ 1), 
+                         data = test_data, 
+                         nstates = 10, 
+                         family = list(gaussian(), gaussian()))
+fitted_model@transition <- fitted_models_list$`State 10`@transition
+fitted_model@response <- fitted_models_list$`State 10`@response
+fitted_model@init <- fitted_models_list$`State 10`@init
+
+fm <- forwardbackward(fitted_model, data = test_data)
+
+print("The normalized log likelihood value for test data is:")
+TestLogLikelihood <- fm$logLik/nrow(test_data)
+print(TestLogLikelihood)
+```
+
+
+```{r}
+library(depmixS4)
+library(dplyr)
+
+# Define function to fit model and calculate log-likelihood for each chunk
+calculate_log_likelihood <- function(chunk_data) {
+  # Fit the model for the chunk
+  fitted_model <- depmix(list(Global_active_power ~ 1, Voltage ~ 1), 
+                         data = chunk_data, 
+                         nstates = 10, 
+                         family = list(gaussian(), gaussian()))
+  fitted_model@transition <- fitted_models_list$`State 10`@transition
+  fitted_model@response <- fitted_models_list$`State 10`@response
+  fitted_model@init <- fitted_models_list$`State 10`@init
+  
+  chunk_data<- dplyr::select(chunk_data, Global_active_power, Voltage)
+  # Run forwardbackward algorithm on the chunk_data
+  fb_result <- forwardbackward(fitted_model, data = chunk_data)
+  
+  # Extract log likelihood values from the forwardbackward result
+  log_likelihood <- fb_result$logLik
+  
+  # Calculate the normalized log likelihood
+  normalized_log_likelihood <- log_likelihood / nrow(chunk_data)
+  
+  return(normalized_log_likelihood)
+}
+
+test_data <- final_preprocessed_data_test
+# Convert the DateTime column to Date
+test_data$Date <- as.Date(test_data$DateTime)
+
+# Define the number of chunks
+num_chunks <- 10  # Change this to the desired number of chunks
+
+# Create a new column for the equal-sized chunks
+test_data <- test_data %>%
+  mutate(Chunk = cut(Date, breaks = num_chunks))
+
+# Initialize an empty list to store results
+results_list <- list()
+
+# Loop over each chunk
+for (chunk in unique(test_data$Chunk)) {
+  # Extract chunk data
+  chunk_data <- filter(test_data, Chunk == chunk)
+  
+  # Compute normalized log-likelihood score for the chunk
+  normalized_log_likelihood <- calculate_log_likelihood(chunk_data)
+  
+  # Store the result
+  results_list[[as.character(chunk)]] <- normalized_log_likelihood
+}
+
+# Combine results into a data frame
+results_df_test <- data.frame(Chunk = names(results_list), NormalizedLogLikelihood = unlist(results_list))
+
+# Calculate the deviation of normalized log likelihood from LogLikelihood
+results_df_test$Deviation <- results_df_test$NormalizedLogLikelihood - LogLikelihood
+
+rownames(results_df_test) <- NULL
+
+# Print the results
+print(results_df_test)
+
+```
+
+```{r}
+# Calculate and print maximum deviation
+max_deviation <- abs(max(results_df_test$Deviation))
+print(paste("Maximum Deviation:", max_deviation))
+
+# Calculate and print minimum deviation
+min_deviation <- abs(min(results_df_test$Deviation))
+print(paste("Minimum Deviation:", min_deviation))
+
+# Calculate and print average deviation
+avg_deviation <- abs(mean(results_df_test$Deviation))
+print(paste("Average Deviation:", avg_deviation))
+```
+
+
+```{r}
+chunk_data <- dplyr::select(chunk_data, Global_active_power, Voltage)
+
+mean <- colMeans(chunk_data)
+std_dev <- apply(chunk_data, 2, sd)
+# Number of anomalies to inject
+n <- 25  # adjust this to your needs
+
+# Create anomalies for each variable
+anomalies <- replicate(n, mean + runif(n = length(mean), min = 4, max = 6) * std_dev * sign(rnorm(n = length(mean))))
+
+# Create a data frame for the anomalies and add an 'anomaly' column
+anomalies_df <- as.data.frame(t(anomalies))
+anomalies_df$anomaly <- 1
+
+# Add an 'anomaly' column to the original data
+chunk_data$anomaly <- 0
+
+# Number of rows in the original data
+n_rows <- nrow(chunk_data)
+
+# Randomly select 'n' indices without replacement
+set.seed(123)  # Set a seed for reproducibility
+random_indices <- sample(n_rows, n)
+
+# Insert anomalies at the randomly selected indices
+chunk_data_with_anomalies <- chunk_data
+chunk_data_with_anomalies[random_indices, ] <- anomalies_df[1:n, ]
+
+# Now, 'chunk_data_with_anomalies' is your data with anomalies inserted at random positions
+head(chunk_data_with_anomalies)
+```
+
+```{r}
+#detecting the anomalies 
+fitted_model <- depmix(list(Global_active_power ~ 1, Voltage ~ 1), 
+                         data = chunk_data_with_anomalies, 
+                         nstates = 10, 
+                         family = list(gaussian(), gaussian()))
+fitted_model@transition <- fitted_models_list$`State 10`@transition
+fitted_model@response <- fitted_models_list$`State 10`@response
+fitted_model@init <- fitted_models_list$`State 10`@init
+
+anomalies <- chunk_data_with_anomalies
+chunk_data_with_anomalies<- dplyr::select(chunk_data_with_anomalies, Global_active_power, Voltage)
+# Run forwardbackward algorithm on the chunk_data
+fb_result <- forwardbackward(fitted_model, data = chunk_data_with_anomalies)
+```
+
+```{r}
+# normalized log likelihood of the dataset with anomalies
+final <- fb_result$logLike/nrow(chunk_data)
+print(final)
+```
+
+```{r}
+#Deviation of the normalised log likelihood from the fitted model 
+final - LogLikelihood
+# we can see this is greater than our maximium of 2.37, hence we flag this data
+```
+
+
